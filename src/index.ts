@@ -2,9 +2,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { osha } from "./osha-client.js";
+import { osha, validateApiKey, OshaApiError } from "./osha-client.js";
+
+validateApiKey();
 
 const server = new McpServer({ name: "mcp-osha", version: "1.0.0" });
+
+// --- Shared schemas ---
 
 const stateCode = z
   .string()
@@ -16,6 +20,69 @@ const dateString = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, "Must be YYYY-MM-DD format")
   .optional();
+
+// --- Response schemas ---
+
+const inspectionSchema = z.array(
+  z.object({
+    activity_nr: z.number().optional(),
+    estab_name: z.string().optional(),
+    site_state: z.string().optional(),
+    open_date: z.string().optional(),
+  }).passthrough(),
+);
+
+const violationSchema = z.array(
+  z.object({
+    activity_nr: z.number().optional(),
+    estab_name: z.string().optional(),
+    viol_type: z.string().optional(),
+    standard: z.string().optional(),
+  }).passthrough(),
+);
+
+const accidentSchema = z.array(
+  z.object({
+    summary_nr: z.number().optional(),
+    event_desc: z.string().optional(),
+    event_date: z.string().optional(),
+  }).passthrough(),
+);
+
+// --- Helpers ---
+
+function mcpText(data: unknown) {
+  return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+}
+
+function mcpError(message: string) {
+  return { isError: true as const, content: [{ type: "text" as const, text: message }] };
+}
+
+async function safeTool<T>(
+  fn: () => Promise<T>,
+  responseSchema?: z.ZodType<T>,
+): Promise<ReturnType<typeof mcpText> | ReturnType<typeof mcpError>> {
+  try {
+    const data = await fn();
+    if (responseSchema) {
+      const parsed = responseSchema.safeParse(data);
+      if (!parsed.success) {
+        return mcpError(
+          `Unexpected API response shape: ${parsed.error.message}\n\nRaw response:\n${JSON.stringify(data, null, 2)}`,
+        );
+      }
+    }
+    return mcpText(data);
+  } catch (err) {
+    if (err instanceof OshaApiError) {
+      return mcpError(`DOL/OSHA API error ${err.status}: ${err.body}`);
+    }
+    return mcpError(`Request failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+// --- Tools ---
 
 server.tool("search_inspections", "Search OSHA workplace inspections", {
   establishment: z.string().optional().describe("Establishment name (partial match)"),
@@ -32,8 +99,7 @@ server.tool("search_inspections", "Search OSHA workplace inspections", {
   if (start_date) params.set("open_date_from", start_date);
   if (end_date) params.set("open_date_to", end_date);
   params.set("limit", String(limit));
-  const data = await osha(`/inspect?${params}`);
-  return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+  return safeTool(() => osha(`/inspect?${params}`), inspectionSchema);
 });
 
 server.tool("search_violations", "Search OSHA violations", {
@@ -49,8 +115,7 @@ server.tool("search_violations", "Search OSHA violations", {
   if (standard) params.set("standard", standard);
   if (violation_type) params.set("viol_type", violation_type);
   params.set("limit", String(limit));
-  const data = await osha(`/violation?${params}`);
-  return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+  return safeTool(() => osha(`/violation?${params}`), violationSchema);
 });
 
 server.tool("search_accidents", "Search OSHA accident/injury reports", {
@@ -68,8 +133,7 @@ server.tool("search_accidents", "Search OSHA accident/injury reports", {
   if (start_date) params.set("event_date_from", start_date);
   if (end_date) params.set("event_date_to", end_date);
   params.set("limit", String(limit));
-  const data = await osha(`/accident?${params}`);
-  return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+  return safeTool(() => osha(`/accident?${params}`), accidentSchema);
 });
 
 server.tool("lookup_standard", "Look up an OSHA standard by number", {
@@ -77,7 +141,7 @@ server.tool("lookup_standard", "Look up an OSHA standard by number", {
 }, async ({ standard }) => {
   const part = standard.split(".")[0];
   const url = `https://www.osha.gov/laws-regs/regulations/standardnumber/${part}/${standard}`;
-  return { content: [{ type: "text", text: JSON.stringify({ standard, url, note: "OSHA standards are HTML pages; use this URL to access full text." }, null, 2) }] };
+  return mcpText({ standard, url, note: "OSHA standards are HTML pages; use this URL to access full text." });
 });
 
 const transport = new StdioServerTransport();

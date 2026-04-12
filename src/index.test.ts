@@ -19,6 +19,14 @@ vi.mock("@modelcontextprotocol/sdk/server/stdio.js", () => ({
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
 
+// --- Silence logger ---
+vi.mock("./osha-client.js", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("./osha-client.js")>();
+  mod.setLogger({ info: vi.fn(), warn: vi.fn(), error: vi.fn() });
+  mod.defaults.initialBackoffMs = 0;
+  return mod;
+});
+
 // --- Capture tool handlers and schemas after single import ---
 type ToolRegistration = {
   handler: Function;
@@ -45,7 +53,16 @@ beforeEach(() => {
 function mockOk(data: unknown = []) {
   mockFetch.mockResolvedValueOnce({
     ok: true,
+    status: 200,
     json: () => Promise.resolve(data),
+  });
+}
+
+function mockError(status: number, body: string) {
+  mockFetch.mockResolvedValueOnce({
+    ok: false,
+    status,
+    text: () => Promise.resolve(body),
   });
 }
 
@@ -341,7 +358,116 @@ describe("lookup_standard", () => {
 });
 
 // ============================================================
-// Zod schema validation (tested via the schema objects)
+// Structured error responses (safeTool)
+// ============================================================
+describe("structured error responses", () => {
+  const call = (params: Record<string, unknown>) =>
+    tools["search_inspections"].handler(params);
+
+  it("returns isError on API failure instead of throwing", async () => {
+    mockError(500, "Internal Server Error");
+
+    const result = await call({ limit: 1 });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("500");
+    expect(result.content[0].text).toContain("Internal Server Error");
+  });
+
+  it("returns isError on 403 Forbidden", async () => {
+    mockError(403, "Forbidden");
+
+    const result = await call({ limit: 1 });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("403");
+  });
+
+  it("returns isError on network failure", async () => {
+    mockFetch.mockRejectedValue(new TypeError("fetch failed"));
+
+    const result = await call({ limit: 1 });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("fetch failed");
+  });
+
+  it("returns isError with response shape mismatch info", async () => {
+    // Return something that's not an array
+    mockOk("not an array");
+
+    const result = await call({ limit: 1 });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("Unexpected API response shape");
+  });
+
+  it("does not set isError on success", async () => {
+    mockOk([]);
+
+    const result = await call({ limit: 1 });
+
+    expect(result.isError).toBeUndefined();
+  });
+});
+
+// ============================================================
+// Response validation
+// ============================================================
+describe("response validation", () => {
+  it("accepts valid inspection response with extra fields", async () => {
+    mockOk([{ activity_nr: 123, estab_name: "Test", extra_field: true }]);
+
+    const result = await tools["search_inspections"].handler({ limit: 1 });
+
+    expect(result.isError).toBeUndefined();
+    expect(JSON.parse(result.content[0].text)).toHaveLength(1);
+  });
+
+  it("accepts valid violation response", async () => {
+    mockOk([{ activity_nr: 456, viol_type: "S", standard: "1910.147" }]);
+
+    const result = await tools["search_violations"].handler({ limit: 1 });
+
+    expect(result.isError).toBeUndefined();
+  });
+
+  it("accepts valid accident response", async () => {
+    mockOk([{ summary_nr: 789, event_desc: "Fall from height" }]);
+
+    const result = await tools["search_accidents"].handler({ limit: 1 });
+
+    expect(result.isError).toBeUndefined();
+  });
+
+  it("rejects non-array inspection response", async () => {
+    mockOk({ error: "unexpected" });
+
+    const result = await tools["search_inspections"].handler({ limit: 1 });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("Unexpected API response shape");
+  });
+
+  it("rejects non-array violation response", async () => {
+    mockOk("string response");
+
+    const result = await tools["search_violations"].handler({ limit: 1 });
+
+    expect(result.isError).toBe(true);
+  });
+
+  it("rejects non-array accident response", async () => {
+    mockOk(42);
+
+    const result = await tools["search_accidents"].handler({ limit: 1 });
+
+    expect(result.isError).toBe(true);
+  });
+});
+
+// ============================================================
+// Zod schema validation
 // ============================================================
 describe("input validation schemas", () => {
   const inspections = () => tools["search_inspections"].schema as any;
