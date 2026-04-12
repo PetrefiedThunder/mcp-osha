@@ -560,6 +560,18 @@ describe("input validation schemas", () => {
     it("rejects non-numeric prefix", () => {
       expect(violations().standard.safeParse("OSHA.147").success).toBe(false);
     });
+
+    it("accepts sub-section standards", () => {
+      expect(violations().standard.safeParse("1926.501.1").success).toBe(true);
+    });
+
+    it("rejects trailing non-numeric characters", () => {
+      expect(violations().standard.safeParse("1910.147abc").success).toBe(false);
+    });
+
+    it("rejects standards with trailing slashes", () => {
+      expect(violations().standard.safeParse("1910.147/extra").success).toBe(false);
+    });
   });
 
   describe("limit", () => {

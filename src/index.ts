@@ -105,7 +105,7 @@ server.tool("search_inspections", "Search OSHA workplace inspections", {
 server.tool("search_violations", "Search OSHA violations", {
   establishment: z.string().optional().describe("Establishment name"),
   state: stateCode,
-  standard: z.string().regex(/^\d{4}\.\d+/, "Must be a valid OSHA standard (e.g. 1910.147)").optional().describe("OSHA standard number (e.g., 1910.147)"),
+  standard: z.string().regex(/^\d{4}(\.\d+)+$/, "Must be a valid OSHA standard (e.g. 1910.147)").optional().describe("OSHA standard number (e.g., 1910.147)"),
   violation_type: z.enum(["S", "W", "R", "O"]).optional().describe("Type: S=Serious, W=Willful, R=Repeat, O=Other"),
   limit: z.number().int().min(1).max(100).default(10),
 }, async ({ establishment, state, standard, violation_type, limit }) => {
@@ -137,7 +137,7 @@ server.tool("search_accidents", "Search OSHA accident/injury reports", {
 });
 
 server.tool("lookup_standard", "Look up an OSHA standard by number", {
-  standard: z.string().regex(/^\d{4}\.\d+/, "Must be a valid OSHA standard (e.g. 1910.147, 1926.501)").describe("Standard number (e.g., 1910.147, 1926.501)"),
+  standard: z.string().regex(/^\d{4}(\.\d+)+$/, "Must be a valid OSHA standard (e.g. 1910.147, 1926.501)").describe("Standard number (e.g., 1910.147, 1926.501)"),
 }, async ({ standard }) => {
   const part = standard.split(".")[0];
   const url = `https://www.osha.gov/laws-regs/regulations/standardnumber/${part}/${standard}`;
