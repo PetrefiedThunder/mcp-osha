@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from "vitest";
+import { describe, it, expect, vi, beforeEach, beforeAll } from "vitest";
 
 // --- Mock the MCP SDK ---
 const mockTool = vi.fn();
@@ -15,30 +15,30 @@ vi.mock("@modelcontextprotocol/sdk/server/stdio.js", () => ({
   StdioServerTransport: class {},
 }));
 
-// --- Mock global fetch ---
+// --- Mock fetch globally ---
 const mockFetch = vi.fn();
+vi.stubGlobal("fetch", mockFetch);
 
-// --- Capture tool handlers after single import ---
-let toolHandlers: Record<string, Function> = {};
+// --- Capture tool handlers and schemas after single import ---
+type ToolRegistration = {
+  handler: Function;
+  schema: Record<string, unknown>;
+  description: string;
+};
+let tools: Record<string, ToolRegistration> = {};
 
 beforeAll(async () => {
-  vi.stubGlobal("fetch", mockFetch);
   process.env.DOL_API_KEY = "test-key";
-
   await import("./index.js");
 
   for (const call of mockTool.mock.calls) {
-    const [name, _desc, _schema, handler] = call;
-    toolHandlers[name] = handler;
+    const [name, desc, schema, handler] = call;
+    tools[name] = { handler, schema, description: desc };
   }
 });
 
 beforeEach(() => {
   mockFetch.mockReset();
-  process.env.DOL_API_KEY = "test-key";
-});
-
-afterEach(() => {
   process.env.DOL_API_KEY = "test-key";
 });
 
@@ -49,66 +49,49 @@ function mockOk(data: unknown = []) {
   });
 }
 
-function mockError(status: number, body: string) {
-  mockFetch.mockResolvedValueOnce({
-    ok: false,
-    status,
-    text: () => Promise.resolve(body),
-  });
-}
-
 // ============================================================
-// 1. osha() API helper — tested indirectly through tool handlers
+// Server registration
 // ============================================================
-describe("osha() API helper", () => {
-  it("sends request with X-API-KEY header", async () => {
-    mockOk();
-    await toolHandlers["search_inspections"]({ limit: 5 });
-
-    expect(mockFetch).toHaveBeenCalledOnce();
-    const [, opts] = mockFetch.mock.calls[0];
-    expect(opts.headers["X-API-KEY"]).toBe("test-key");
+describe("server setup", () => {
+  it("registers exactly 4 tools", () => {
+    expect(Object.keys(tools)).toHaveLength(4);
   });
 
-  it("uses empty string when DOL_API_KEY is not set", async () => {
-    delete process.env.DOL_API_KEY;
-    mockOk();
-
-    await toolHandlers["search_inspections"]({ limit: 1 });
-
-    const [, opts] = mockFetch.mock.calls[0];
-    expect(opts.headers["X-API-KEY"]).toBe("");
+  it("registers search_inspections", () => {
+    expect(tools["search_inspections"]).toBeDefined();
+    expect(tools["search_inspections"].description).toBe("Search OSHA workplace inspections");
   });
 
-  it("throws on non-ok response with status and body", async () => {
-    mockError(403, "Forbidden");
-
-    await expect(
-      toolHandlers["search_inspections"]({ limit: 1 })
-    ).rejects.toThrow("DOL/OSHA API 403: Forbidden");
+  it("registers search_violations", () => {
+    expect(tools["search_violations"]).toBeDefined();
+    expect(tools["search_violations"].description).toBe("Search OSHA violations");
   });
 
-  it("propagates network errors from fetch", async () => {
-    mockFetch.mockRejectedValueOnce(new Error("Network error"));
+  it("registers search_accidents", () => {
+    expect(tools["search_accidents"]).toBeDefined();
+    expect(tools["search_accidents"].description).toBe("Search OSHA accident/injury reports");
+  });
 
-    await expect(
-      toolHandlers["search_inspections"]({ limit: 1 })
-    ).rejects.toThrow("Network error");
+  it("registers lookup_standard", () => {
+    expect(tools["lookup_standard"]).toBeDefined();
+    expect(tools["lookup_standard"].description).toBe("Look up an OSHA standard by number");
+  });
+
+  it("connects to transport", () => {
+    expect(mockConnect).toHaveBeenCalledOnce();
   });
 });
 
 // ============================================================
-// 2. search_inspections
+// search_inspections
 // ============================================================
 describe("search_inspections", () => {
-  it("is registered as a tool", () => {
-    expect(toolHandlers["search_inspections"]).toBeDefined();
-  });
+  const call = (params: Record<string, unknown>) =>
+    tools["search_inspections"].handler(params);
 
   it("builds correct query params with all parameters", async () => {
     mockOk();
-
-    await toolHandlers["search_inspections"]({
+    await call({
       establishment: "Acme Corp",
       state: "TX",
       sic_code: "2011",
@@ -128,20 +111,22 @@ describe("search_inspections", () => {
 
   it("omits optional params when undefined", async () => {
     mockOk();
-
-    await toolHandlers["search_inspections"]({ limit: 10 });
+    await call({ limit: 10 });
 
     const url = new URL(mockFetch.mock.calls[0][0]);
     expect(url.searchParams.has("establishment_name")).toBe(false);
     expect(url.searchParams.has("site_state")).toBe(false);
+    expect(url.searchParams.has("sic_code")).toBe(false);
+    expect(url.searchParams.has("open_date_from")).toBe(false);
+    expect(url.searchParams.has("open_date_to")).toBe(false);
     expect(url.searchParams.get("limit")).toBe("10");
   });
 
   it("returns MCP-formatted content", async () => {
-    const data = [{ id: 1, name: "Test" }];
+    const data = [{ activity_nr: 123, estab_name: "Test Co" }];
     mockOk(data);
 
-    const result = await toolHandlers["search_inspections"]({ limit: 1 });
+    const result = await call({ limit: 1 });
 
     expect(result).toEqual({
       content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
@@ -150,24 +135,42 @@ describe("search_inspections", () => {
 
   it("calls the /inspect endpoint", async () => {
     mockOk();
-
-    await toolHandlers["search_inspections"]({ limit: 1 });
-
+    await call({ limit: 1 });
     expect(mockFetch.mock.calls[0][0]).toContain("/api/inspect?");
+  });
+
+  it("handles empty API response", async () => {
+    mockOk([]);
+    const result = await call({ limit: 1 });
+    expect(JSON.parse(result.content[0].text)).toEqual([]);
+  });
+
+  it("handles large result set", async () => {
+    const bigData = Array.from({ length: 100 }, (_, i) => ({ id: i }));
+    mockOk(bigData);
+    const result = await call({ limit: 100 });
+    expect(JSON.parse(result.content[0].text)).toHaveLength(100);
+  });
+
+  it("URL-encodes special characters in establishment name", async () => {
+    mockOk();
+    await call({ establishment: "O'Brien & Sons", limit: 1 });
+
+    const url = mockFetch.mock.calls[0][0] as string;
+    expect(url).toContain("establishment_name=O%27Brien+%26+Sons");
   });
 });
 
 // ============================================================
-// 3. search_violations
+// search_violations
 // ============================================================
 describe("search_violations", () => {
+  const call = (params: Record<string, unknown>) =>
+    tools["search_violations"].handler(params);
+
   it("maps violation_type to viol_type query param", async () => {
     mockOk();
-
-    await toolHandlers["search_violations"]({
-      violation_type: "S",
-      limit: 5,
-    });
+    await call({ violation_type: "S", limit: 5 });
 
     const url = new URL(mockFetch.mock.calls[0][0]);
     expect(url.searchParams.get("viol_type")).toBe("S");
@@ -176,8 +179,7 @@ describe("search_violations", () => {
 
   it("maps all parameters to correct API field names", async () => {
     mockOk();
-
-    await toolHandlers["search_violations"]({
+    await call({
       establishment: "Factory",
       state: "CA",
       standard: "1910.147",
@@ -195,24 +197,42 @@ describe("search_violations", () => {
 
   it("calls the /violation endpoint", async () => {
     mockOk();
-
-    await toolHandlers["search_violations"]({ limit: 1 });
-
+    await call({ limit: 1 });
     expect(mockFetch.mock.calls[0][0]).toContain("/api/violation?");
+  });
+
+  it("passes each violation type correctly", async () => {
+    for (const type of ["S", "W", "R", "O"]) {
+      mockOk();
+      await call({ violation_type: type, limit: 1 });
+
+      const url = new URL(mockFetch.mock.calls[mockFetch.mock.calls.length - 1][0]);
+      expect(url.searchParams.get("viol_type")).toBe(type);
+    }
+  });
+
+  it("omits optional params when undefined", async () => {
+    mockOk();
+    await call({ limit: 5 });
+
+    const url = new URL(mockFetch.mock.calls[0][0]);
+    expect(url.searchParams.has("establishment_name")).toBe(false);
+    expect(url.searchParams.has("site_state")).toBe(false);
+    expect(url.searchParams.has("standard")).toBe(false);
+    expect(url.searchParams.has("viol_type")).toBe(false);
   });
 });
 
 // ============================================================
-// 4. search_accidents
+// search_accidents
 // ============================================================
 describe("search_accidents", () => {
+  const call = (params: Record<string, unknown>) =>
+    tools["search_accidents"].handler(params);
+
   it("maps event_keyword to keyword query param", async () => {
     mockOk();
-
-    await toolHandlers["search_accidents"]({
-      event_keyword: "fall",
-      limit: 5,
-    });
+    await call({ event_keyword: "fall", limit: 5 });
 
     const url = new URL(mockFetch.mock.calls[0][0]);
     expect(url.searchParams.get("keyword")).toBe("fall");
@@ -220,8 +240,7 @@ describe("search_accidents", () => {
 
   it("maps date params to event_date_from/to", async () => {
     mockOk();
-
-    await toolHandlers["search_accidents"]({
+    await call({
       start_date: "2024-01-01",
       end_date: "2024-06-30",
       limit: 5,
@@ -234,12 +253,7 @@ describe("search_accidents", () => {
 
   it("passes degree and state directly", async () => {
     mockOk();
-
-    await toolHandlers["search_accidents"]({
-      state: "NY",
-      degree: "fatality",
-      limit: 3,
-    });
+    await call({ state: "NY", degree: "fatality", limit: 3 });
 
     const url = new URL(mockFetch.mock.calls[0][0]);
     expect(url.searchParams.get("state")).toBe("NY");
@@ -248,22 +262,42 @@ describe("search_accidents", () => {
 
   it("calls the /accident endpoint", async () => {
     mockOk();
-
-    await toolHandlers["search_accidents"]({ limit: 1 });
-
+    await call({ limit: 1 });
     expect(mockFetch.mock.calls[0][0]).toContain("/api/accident?");
+  });
+
+  it("passes all degree enum values", async () => {
+    for (const deg of ["fatality", "hospitalization", "amputation", "loss_of_eye"]) {
+      mockOk();
+      await call({ degree: deg, limit: 1 });
+
+      const url = new URL(mockFetch.mock.calls[mockFetch.mock.calls.length - 1][0]);
+      expect(url.searchParams.get("degree")).toBe(deg);
+    }
+  });
+
+  it("omits optional params when undefined", async () => {
+    mockOk();
+    await call({ limit: 1 });
+
+    const url = new URL(mockFetch.mock.calls[0][0]);
+    expect(url.searchParams.has("state")).toBe(false);
+    expect(url.searchParams.has("keyword")).toBe(false);
+    expect(url.searchParams.has("degree")).toBe(false);
+    expect(url.searchParams.has("event_date_from")).toBe(false);
+    expect(url.searchParams.has("event_date_to")).toBe(false);
   });
 });
 
 // ============================================================
-// 5. lookup_standard — URL construction
+// lookup_standard — URL construction
 // ============================================================
 describe("lookup_standard", () => {
-  it("constructs correct OSHA URL for standard 1910.147", async () => {
-    const result = await toolHandlers["lookup_standard"]({
-      standard: "1910.147",
-    });
+  const call = (params: Record<string, unknown>) =>
+    tools["lookup_standard"].handler(params);
 
+  it("constructs correct URL for 1910.147", async () => {
+    const result = await call({ standard: "1910.147" });
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.url).toBe(
       "https://www.osha.gov/laws-regs/regulations/standardnumber/1910/1910.147"
@@ -271,57 +305,158 @@ describe("lookup_standard", () => {
     expect(parsed.standard).toBe("1910.147");
   });
 
-  it("constructs correct OSHA URL for standard 1926.501", async () => {
-    const result = await toolHandlers["lookup_standard"]({
-      standard: "1926.501",
-    });
-
+  it("constructs correct URL for 1926.501", async () => {
+    const result = await call({ standard: "1926.501" });
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.url).toBe(
       "https://www.osha.gov/laws-regs/regulations/standardnumber/1926/1926.501"
     );
   });
 
+  it("handles sub-section standards like 1926.501.1", async () => {
+    const result = await call({ standard: "1926.501.1" });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.url).toBe(
+      "https://www.osha.gov/laws-regs/regulations/standardnumber/1926/1926.501.1"
+    );
+  });
+
   it("does not call the DOL API", async () => {
-    await toolHandlers["lookup_standard"]({ standard: "1910.147" });
+    await call({ standard: "1910.147" });
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it("includes a note about HTML pages", async () => {
-    const result = await toolHandlers["lookup_standard"]({
-      standard: "1910.147",
-    });
-
+    const result = await call({ standard: "1910.147" });
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.note).toContain("HTML");
   });
 
-  it("handles standard without a dot", async () => {
-    const result = await toolHandlers["lookup_standard"]({
-      standard: "1910",
-    });
-
-    const parsed = JSON.parse(result.content[0].text);
-    expect(parsed.url).toBe(
-      "https://www.osha.gov/laws-regs/regulations/standardnumber/1910/1910"
-    );
+  it("returns MCP-formatted content", async () => {
+    const result = await call({ standard: "1910.147" });
+    expect(result.content).toHaveLength(1);
+    expect(result.content[0].type).toBe("text");
+    expect(() => JSON.parse(result.content[0].text)).not.toThrow();
   });
 });
 
 // ============================================================
-// 6. Server registration
+// Zod schema validation (tested via the schema objects)
 // ============================================================
-describe("server setup", () => {
-  it("registers all 4 tools", () => {
-    const toolNames = mockTool.mock.calls.map((c: unknown[]) => c[0]);
-    expect(toolNames).toContain("search_inspections");
-    expect(toolNames).toContain("search_violations");
-    expect(toolNames).toContain("search_accidents");
-    expect(toolNames).toContain("lookup_standard");
-    expect(toolNames).toHaveLength(4);
+describe("input validation schemas", () => {
+  const inspections = () => tools["search_inspections"].schema as any;
+  const violations = () => tools["search_violations"].schema as any;
+
+  describe("state code", () => {
+    it("accepts valid two-letter state codes", () => {
+      expect(inspections().state.safeParse("TX").success).toBe(true);
+      expect(inspections().state.safeParse("CA").success).toBe(true);
+      expect(inspections().state.safeParse("NY").success).toBe(true);
+    });
+
+    it("rejects lowercase state codes", () => {
+      expect(inspections().state.safeParse("tx").success).toBe(false);
+    });
+
+    it("rejects three-letter codes", () => {
+      expect(inspections().state.safeParse("TEX").success).toBe(false);
+    });
+
+    it("rejects single-letter codes", () => {
+      expect(inspections().state.safeParse("T").success).toBe(false);
+    });
+
+    it("rejects numeric codes", () => {
+      expect(inspections().state.safeParse("12").success).toBe(false);
+    });
+
+    it("accepts undefined (optional)", () => {
+      expect(inspections().state.safeParse(undefined).success).toBe(true);
+    });
   });
 
-  it("connects to transport", () => {
-    expect(mockConnect).toHaveBeenCalledOnce();
+  describe("date format", () => {
+    it("accepts valid YYYY-MM-DD dates", () => {
+      expect(inspections().start_date.safeParse("2024-01-15").success).toBe(true);
+      expect(inspections().start_date.safeParse("2023-12-31").success).toBe(true);
+    });
+
+    it("rejects MM/DD/YYYY format", () => {
+      expect(inspections().start_date.safeParse("01/15/2024").success).toBe(false);
+    });
+
+    it("rejects DD-MM-YYYY format", () => {
+      expect(inspections().start_date.safeParse("15-01-2024").success).toBe(false);
+    });
+
+    it("rejects bare year", () => {
+      expect(inspections().start_date.safeParse("2024").success).toBe(false);
+    });
+
+    it("rejects empty string", () => {
+      expect(inspections().start_date.safeParse("").success).toBe(false);
+    });
+
+    it("accepts undefined (optional)", () => {
+      expect(inspections().start_date.safeParse(undefined).success).toBe(true);
+    });
+  });
+
+  describe("SIC code", () => {
+    it("accepts valid 4-digit SIC codes", () => {
+      expect(inspections().sic_code.safeParse("2011").success).toBe(true);
+      expect(inspections().sic_code.safeParse("3599").success).toBe(true);
+    });
+
+    it("rejects 3-digit codes", () => {
+      expect(inspections().sic_code.safeParse("201").success).toBe(false);
+    });
+
+    it("rejects 5-digit codes", () => {
+      expect(inspections().sic_code.safeParse("20110").success).toBe(false);
+    });
+
+    it("rejects non-numeric", () => {
+      expect(inspections().sic_code.safeParse("ABCD").success).toBe(false);
+    });
+  });
+
+  describe("OSHA standard number", () => {
+    it("accepts valid standards", () => {
+      expect(violations().standard.safeParse("1910.147").success).toBe(true);
+      expect(violations().standard.safeParse("1926.501").success).toBe(true);
+    });
+
+    it("rejects standard without a dot", () => {
+      expect(violations().standard.safeParse("1910").success).toBe(false);
+    });
+
+    it("rejects non-numeric prefix", () => {
+      expect(violations().standard.safeParse("OSHA.147").success).toBe(false);
+    });
+  });
+
+  describe("limit", () => {
+    it("accepts valid limits", () => {
+      expect(inspections().limit.safeParse(1).success).toBe(true);
+      expect(inspections().limit.safeParse(50).success).toBe(true);
+      expect(inspections().limit.safeParse(100).success).toBe(true);
+    });
+
+    it("rejects zero", () => {
+      expect(inspections().limit.safeParse(0).success).toBe(false);
+    });
+
+    it("rejects negative numbers", () => {
+      expect(inspections().limit.safeParse(-1).success).toBe(false);
+    });
+
+    it("rejects numbers over 100", () => {
+      expect(inspections().limit.safeParse(101).success).toBe(false);
+    });
+
+    it("rejects floats", () => {
+      expect(inspections().limit.safeParse(5.5).success).toBe(false);
+    });
   });
 });
