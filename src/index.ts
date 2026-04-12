@@ -16,10 +16,7 @@ const stateCode = z
   .optional()
   .describe("Two-letter state code");
 
-const dateString = z
-  .string()
-  .regex(/^\d{4}-\d{2}-\d{2}$/, "Must be YYYY-MM-DD format")
-  .optional();
+const dateString = z.iso.date().optional();
 
 // --- Response schemas ---
 

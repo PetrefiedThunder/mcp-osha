@@ -523,6 +523,14 @@ describe("input validation schemas", () => {
       expect(inspections().start_date.safeParse("").success).toBe(false);
     });
 
+    it("rejects impossible dates like 2024-13-40", () => {
+      expect(inspections().start_date.safeParse("2024-13-40").success).toBe(false);
+    });
+
+    it("rejects impossible day like 2024-02-30", () => {
+      expect(inspections().start_date.safeParse("2024-02-30").success).toBe(false);
+    });
+
     it("accepts undefined (optional)", () => {
       expect(inspections().start_date.safeParse(undefined).success).toBe(true);
     });

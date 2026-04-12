@@ -1,4 +1,4 @@
-const BASE = "https://enforcedata.dol.gov/api";
+const BASE = process.env.DOL_API_BASE_URL ?? "https://enforcedata.dol.gov/api";
 
 export const defaults = {
   timeoutMs: 30_000,
@@ -76,6 +76,7 @@ export async function osha(path: string): Promise<unknown> {
         });
 
         if (res.status === 429 && attempt < defaults.maxRetries) {
+          await res.text();
           lastError = new OshaApiError(429, "Rate limited");
           logger.warn("Rate limited by DOL/OSHA API", { path, attempt });
           continue;
