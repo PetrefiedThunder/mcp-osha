@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [codex/validate-osha50-20261107-7KJEfk]
   pull_request:
     branches: [main]
 
@@ -18,10 +18,19 @@ jobs:
         node-version: [20, 22]
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: cfd5d513df457f67bef4dfa94db95678887a2598
+          fetch-depth: 2
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
+      - name: Verify integration commit and parents
+        run: |
+          test "$(git rev-parse HEAD)" = "cfd5d513df457f67bef4dfa94db95678887a2598"
+          test "$(git show -s --format=%P HEAD)" = "aa61e194e2eeb1e1c42ce3392980458b0b701bf8 26d51954cda9fcc83ccae973a607a0dabc3778cf"
+          git show -s --format="%H %P"
+          node --version
       - run: npm ci
       - run: npm run build
       - run: npm test
